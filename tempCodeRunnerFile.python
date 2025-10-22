@@ -1,0 +1,11 @@
+import requests
+import time
+
+url = "http://192.168.15.254/data"
+
+while True:
+    try: 
+        data = requests.get(url).json()
+        print(data)
+    except:
+        print("Error fetching data")

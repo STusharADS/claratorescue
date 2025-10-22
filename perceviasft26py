@@ -12,6 +12,7 @@ from ultralytics import YOLO
 from PIL import Image
 from insightface.app import FaceAnalysis
 from dotenv import load_dotenv 
+import speech_recognition as sr
 
 
 VIDEO_ENDPOINT = "http://10.151.122.93:81/stream"
@@ -73,6 +74,27 @@ def load_db(path="face_db.pkl"):
         with open(path, "rb") as f:
             face_db = pickle.load(f)
 
+# Object DB
+object_db = {}
+def save_object_db(path="object_db.pkl"):
+    with open(path, "wb") as f:
+        pickle.dump(object_db, f)
+
+def load_object_db(path="object_db.pkl"):
+    global object_db
+    if object_db:
+        return
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            loaded = pickle.load(f)
+        if isinstance(loaded, dict):
+            object_db = loaded
+        else:
+            print("[WARN] Invalid object_db format, resetting to empty dict.")
+            object_db = {}
+    else:
+        object_db = {}
+
 def cosine(a, b):
     return float(np.dot(a, b))
 
@@ -133,15 +155,19 @@ previous_button = "RELEASED"
 
 
 BUTTON_HEIGHT = 50
-BUTTON_WIDTH = 640 // 3
+BUTTON_WIDTH = 640 // 5
 QUIT_RECT = (0, 360 - BUTTON_HEIGHT, BUTTON_WIDTH, 360)
-REGISTER_RECT = (BUTTON_WIDTH, 360 - BUTTON_HEIGHT, 2 * BUTTON_WIDTH, 360)
-DESCRIBE_RECT = (2 * BUTTON_WIDTH, 360 - BUTTON_HEIGHT, 640, 360)
+REGISTER_FACE_RECT = (BUTTON_WIDTH, 360 - BUTTON_HEIGHT, 2 * BUTTON_WIDTH, 360)
+REGISTER_OBJECT_RECT = (2 * BUTTON_WIDTH, 360 - BUTTON_HEIGHT, 3 * BUTTON_WIDTH, 360)
+DESCRIBE_RECT = (3 * BUTTON_WIDTH, 360 - BUTTON_HEIGHT, 4 * BUTTON_WIDTH, 360)
+VOICE_INPUT_RECT = (4 * BUTTON_WIDTH, 360 - BUTTON_HEIGHT, 5 * BUTTON_WIDTH, 360)
 
 
 quit_flag = False
-register_flag = False
+register_face_flag = False
+register_object_flag = False
 describe_flag = False
+voice_input_flag = False
 
 
 def get_distance_from_esp32():
@@ -191,8 +217,11 @@ def announce_object(obj_name, quadrant, dist):
             dist_str = f"{dist:.0f}" if dist > 0 else ""
             spoken_quadrant = quadrant.replace("Quadrant ", "")
             message = f"{obj_name} {spoken_quadrant} {dist_str}"
-            engine.say(message)
-            engine.runAndWait()
+            try:
+                engine.say(message)
+                engine.runAndWait()
+            except Exception as e:
+                print(f"[WARN] TTS error: {e}")
             last_spoken[key] = now
     Thread(target=speak).start()
 
@@ -207,39 +236,57 @@ def describe_with_gemini(frame):
         description = response.text
         print("Gemini Description:", description)
         def speak_description():
-            engine.say(description)
-            engine.runAndWait()
+            try:
+                engine.say(description)
+                engine.runAndWait()
+            except Exception as e:
+                print(f"[WARN] TTS error: {e}")
         Thread(target=speak_description).start()
     except Exception as e:
         print(f"Error with Gemini API: {e}")
-        engine.say("Sorry, I could not describe the scene.")
-        engine.runAndWait()
+        try:
+            engine.say("Sorry, I could not describe the scene.")
+            engine.runAndWait()
+        except Exception as e_tts:
+            print(f"[WARN] TTS error: {e_tts}")
     finally:
         pause_detection = False
         print("Resuming detection.")
 
 def on_mouse(event, x, y, flags, param):
-    global quit_flag, register_flag, describe_flag
+    global quit_flag, register_face_flag, register_object_flag, describe_flag, voice_input_flag
     if event == cv2.EVENT_LBUTTONDOWN:
         if QUIT_RECT[0] <= x < QUIT_RECT[2] and QUIT_RECT[1] <= y < QUIT_RECT[3]:
             quit_flag = True
-        elif REGISTER_RECT[0] <= x < REGISTER_RECT[2] and REGISTER_RECT[1] <= y < REGISTER_RECT[3]:
-            register_flag = True
+        elif REGISTER_FACE_RECT[0] <= x < REGISTER_FACE_RECT[2] and REGISTER_FACE_RECT[1] <= y < REGISTER_FACE_RECT[3]:
+            register_face_flag = True
+        elif REGISTER_OBJECT_RECT[0] <= x < REGISTER_OBJECT_RECT[2] and REGISTER_OBJECT_RECT[1] <= y < REGISTER_OBJECT_RECT[3]:
+            register_object_flag = True
         elif DESCRIBE_RECT[0] <= x < DESCRIBE_RECT[2] and DESCRIBE_RECT[1] <= y < DESCRIBE_RECT[3]:
             describe_flag = True
+        elif VOICE_INPUT_RECT[0] <= x < VOICE_INPUT_RECT[2] and VOICE_INPUT_RECT[1] <= y < VOICE_INPUT_RECT[3]:
+            voice_input_flag = True
 
 def draw_buttons(frame):
     # Quit button
     cv2.rectangle(frame, (QUIT_RECT[0], QUIT_RECT[1]), (QUIT_RECT[2], QUIT_RECT[3]), (200, 200, 200), -1)
-    cv2.putText(frame, "Quit", (QUIT_RECT[0] + 70, QUIT_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.putText(frame, "Quit", (QUIT_RECT[0] + 35, QUIT_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
     
-    # Register button
-    cv2.rectangle(frame, (REGISTER_RECT[0], REGISTER_RECT[1]), (REGISTER_RECT[2], REGISTER_RECT[3]), (200, 200, 200), -1)
-    cv2.putText(frame, "Register", (REGISTER_RECT[0] + 40, REGISTER_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    # Register face button
+    cv2.rectangle(frame, (REGISTER_FACE_RECT[0], REGISTER_FACE_RECT[1]), (REGISTER_FACE_RECT[2], REGISTER_FACE_RECT[3]), (200, 200, 200), -1)
+    cv2.putText(frame, "Reg Face", (REGISTER_FACE_RECT[0] + 5, REGISTER_FACE_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    
+    # Register object button
+    cv2.rectangle(frame, (REGISTER_OBJECT_RECT[0], REGISTER_OBJECT_RECT[1]), (REGISTER_OBJECT_RECT[2], REGISTER_OBJECT_RECT[3]), (200, 200, 200), -1)
+    cv2.putText(frame, "Reg Obj", (REGISTER_OBJECT_RECT[0] + 5, REGISTER_OBJECT_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
     
     # Describe button
-    cv2.rectangle(frame, (DESCRIBE_RECT[0], DESCRIBE_RECT[1]), (DESCRIBE_RECT[2], DESCRIBE_RECT[3]), (200, 200, 200), -1)
-    cv2.putText(frame, "Describe", (DESCRIBE_RECT[0] + 40, DESCRIBE_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.rectangle(frame, (DESCRIBE_RECT[0], DESCRIBE_RECT[1]), (DESCRIBE_RECT[2], REGISTER_OBJECT_RECT[3]), (200, 200, 200), -1)
+    cv2.putText(frame, "Describe", (DESCRIBE_RECT[0] + 5, DESCRIBE_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+
+    # Voice Input button
+    cv2.rectangle(frame, (VOICE_INPUT_RECT[0], VOICE_INPUT_RECT[1]), (VOICE_INPUT_RECT[2], VOICE_INPUT_RECT[3]), (200, 200, 200), -1)
+    cv2.putText(frame, "Voice Input", (VOICE_INPUT_RECT[0] + 5, VOICE_INPUT_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
 load_db()
 build_face_db("faces_dataset")
@@ -254,6 +301,10 @@ cv2.namedWindow("Smart Recognition")
 cv2.setMouseCallback("Smart Recognition", on_mouse)
 
 last_faces = []
+button_press_start = None
+
+# Define OBJECT_ROI (assuming central area for 640x360 frame)
+OBJECT_ROI = (160, 90, 480, 270)  # x1, y1, x2, y2
 
 while True:
     ret, frame = cap.read()
@@ -279,19 +330,74 @@ while True:
         print("Quitting...")
         break
     elif key == ord('r'):
-        register_flag = True
+        register_face_flag = True
+    elif key == ord('o'):
+        register_object_flag = True
     elif key == ord('c'):
         describe_flag = True
 
-    if previous_button == 'RELEASED' and current_button == 'PRESSED':
-        describe_flag = True
+    if current_button == 'PRESSED' and previous_button == 'RELEASED':
+        button_press_start = time.time()
+
+    elif current_button == 'RELEASED' and previous_button == 'PRESSED':
+        if button_press_start is not None:
+            hold_duration = time.time() - button_press_start
+            if 3 <= hold_duration <= 5:
+                recognizer = sr.Recognizer()
+                print("Available microphones:", sr.Microphone.list_microphone_names())
+                # Change device_index if needed, e.g., sr.Microphone(device_index=1)
+                with sr.Microphone() as source:
+                    print("Calibrating microphone for ambient noise...")
+                    recognizer.adjust_for_ambient_noise(source, duration=1)
+                    print("Adjusted energy threshold:", recognizer.energy_threshold)
+                    if recognizer.energy_threshold > 500:
+                        recognizer.energy_threshold = 300  # Lower if too high
+                    recognizer.dynamic_energy_threshold = False  # Disable dynamic adjustment
+
+                    print("Listening for prompt...")
+                    try:
+                        audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+                        prompt = recognizer.recognize_google(audio)
+                        print(f"Transcribed prompt: {prompt}")
+                        response = gemini_model.generate_content(prompt)
+                        description = response.text
+                        try:
+                            engine.say(description)
+                            engine.runAndWait()
+                        except Exception as e:
+                            print(f"[WARN] TTS error: {e}")
+                    except sr.WaitTimeoutError:
+                        print("Listening timed out. No speech detected.")
+                        try:
+                            engine.say("Sorry, listening timed out. Please try again.")
+                            engine.runAndWait()
+                        except Exception as e:
+                            print(f"[WARN] TTS error: {e}")
+                    except sr.UnknownValueError:
+                        print("Could not understand audio")
+                        try:
+                            engine.say("Sorry, I could not understand the prompt.")
+                            engine.runAndWait()
+                        except Exception as e:
+                            print(f"[WARN] TTS error: {e}")
+                    except sr.RequestError as e:
+                        print(f"Speech recognition error: {e}")
+                        try:
+                            engine.say("Sorry, there was an error with speech recognition.")
+                            engine.runAndWait()
+                        except Exception as e_tts:
+                            print(f"[WARN] TTS error: {e_tts}")
+            elif hold_duration < 3:
+                describe_flag = True
+            button_press_start = None
+
     previous_button = current_button
 
     if quit_flag:
         print("Quitting...")
         break
 
-    if register_flag:
+    if register_face_flag:
         if not last_faces:
             print("[WARN] No face in frame to register.")
         else:
@@ -337,7 +443,144 @@ while True:
                     input_name = input_name[:-1]
                 elif 32 <= input_key <= 126: 
                     input_name += chr(input_key)
-        register_flag = False
+        register_face_flag = False
+        continue
+
+    if register_object_flag:
+        # NEW: Capture mode with outline before text input
+        capture_active = True
+        suggested_desc = ""
+        while capture_active:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            current_frame = frame.copy()
+            # Draw red outline for ROI
+            cv2.rectangle(current_frame, (OBJECT_ROI[0], OBJECT_ROI[1]), (OBJECT_ROI[2], OBJECT_ROI[3]), (0, 0, 255), 2)
+            cv2.putText(current_frame, "Place object inside outline, press 'c' to capture, Esc to cancel", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.imshow("Smart Recognition", current_frame)
+            
+            input_key = cv2.waitKey(1) & 0xFF
+            if input_key == 27:  # Esc
+                print("[INFO] Object registration cancelled.")
+                capture_active = False
+                register_object_flag = False
+                continue
+            elif input_key == ord('c'):
+                # Capture crop from ROI
+                crop = frame[OBJECT_ROI[1]:OBJECT_ROI[3], OBJECT_ROI[0]:OBJECT_ROI[2]]
+                if crop.size == 0:
+                    print("[WARN] Empty crop; try again.")
+                    continue
+                rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(rgb_crop)
+                try:
+                    response = gemini_model.generate_content(["Provide a concise but detailed description of the main object in this image for use in object detection (e.g., color, shape, material). Try to keep description in about 20-30", img])
+                    suggested_desc = response.text.strip()
+                    print("Suggested description:", suggested_desc)
+                except Exception as e:
+                    print(f"Error generating description: {e}")
+                    suggested_desc = ""
+                capture_active = False
+
+        # Enter text input mode for name and desc (pre-fill desc)
+        input_name = ""
+        input_desc = suggested_desc
+        input_active = True
+        input_stage = "name"  # "name" or "desc"
+        while input_active:
+            # Clone the current frame to draw on
+            input_frame = current_frame.copy()
+            # Draw text input area
+            cv2.rectangle(input_frame, (100, 150), (540, 210), (255, 255, 255), -1)
+            if input_stage == "name":
+                cv2.putText(input_frame, "Enter name: " + input_name + "_", (110, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+            else:
+                cv2.putText(input_frame, "Enter desc: " + input_desc + "_", (110, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+            cv2.putText(input_frame, "Press Enter to confirm, Esc to cancel", (100, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.imshow("Smart Recognition", input_frame)
+            
+            input_key = cv2.waitKey(0) & 0xFF
+            if input_key == 27:  # Esc
+                print("[INFO] Object registration cancelled.")
+                input_active = False
+                break
+            elif input_key == 13:  # Enter
+                if input_stage == "name":
+                    name = input_name.strip()
+                    if not name:
+                        print("[WARN] Empty name; skipped.")
+                        input_active = False
+                        break
+                    input_stage = "desc"
+                else:
+                    desc = input_desc.strip()
+                    if not desc:
+                        desc = name
+                    object_db[name] = desc
+                    save_object_db()
+                    print(f"[INFO] Registered object {name} with description '{desc}'.")
+                    input_active = False
+                    break
+            elif input_key == 8:  # Backspace
+                if input_stage == "name":
+                    input_name = input_name[:-1]
+                else:
+                    input_desc = input_desc[:-1]
+            elif 32 <= input_key <= 126:  # Printable characters
+                if input_stage == "name":
+                    input_name += chr(input_key)
+                else:
+                    input_desc += chr(input_key)
+        register_object_flag = False
+        continue
+
+    if voice_input_flag:
+        recognizer = sr.Recognizer()
+        print("Available microphones:", sr.Microphone.list_microphone_names())
+        # Change device_index if needed, e.g., sr.Microphone(device_index=1)
+        with sr.Microphone() as source:
+            print("Calibrating microphone for ambient noise...")
+            recognizer.adjust_for_ambient_noise(source, duration=1)
+            print("Adjusted energy threshold:", recognizer.energy_threshold)
+            if recognizer.energy_threshold > 500:
+                recognizer.energy_threshold = 300  # Lower if too high
+            recognizer.dynamic_energy_threshold = False  # Disable dynamic adjustment
+
+            print("Listening for prompt...")
+            try:
+                audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+                prompt = recognizer.recognize_google(audio)
+                print(f"Transcribed prompt: {prompt}")
+                response = gemini_model.generate_content(prompt)
+                description = response.text
+                try:
+                    engine.say(description)
+                    engine.runAndWait()
+                except Exception as e:
+                    print(f"[WARN] TTS error: {e}")
+            except sr.WaitTimeoutError:
+                print("Listening timed out. No speech detected.")
+                try:
+                    engine.say("Sorry, listening timed out. Please try again.")
+                    engine.runAndWait()
+                except Exception as e:
+                    print(f"[WARN] TTS error: {e}")
+            except sr.UnknownValueError:
+                print("Could not understand audio")
+                try:
+                    engine.say("Sorry, I could not understand the prompt.")
+                    engine.runAndWait()
+                except Exception as e:
+                    print(f"[WARN] TTS error: {e}")
+            except sr.RequestError as e:
+                print(f"Speech recognition error: {e}")
+                try:
+                    engine.say("Sorry, there was an error with speech recognition.")
+                    engine.runAndWait()
+                except Exception as e_tts:
+                    print(f"[WARN] TTS error: {e_tts}")
+        voice_input_flag = False
         continue
 
     if describe_flag:
@@ -434,3 +677,10 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
+# Add this for cleanup
+try:
+    engine.stop()
+    engine = None  # Force garbage collection
+except:
+    pass  # Ignore any errors during cleanup

@@ -11,34 +11,26 @@ from threading import Thread, Lock
 from ultralytics import YOLO
 from PIL import Image
 from insightface.app import FaceAnalysis
-from dotenv import load_dotenv 
 
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+ESP32_IP = "172.20.180.190"  # Replace with your ESP32's IP
+DISTANCE_ENDPOINT = "http://192.168.15.254/data"
+DISTANCE_UPDATE_INTERVAL = 1.0  # seconds
 
-VIDEO_ENDPOINT = "http://10.151.122.93:81/stream"
-ESP32_IP = "http://10.151.122.128"  
-DATA_ENDPOINT = f"http://{ESP32_IP}/data"
-DISTANCE_UPDATE_INTERVAL = 1.0  
-
-VIBRATE_ENDPOINT = f"http://{ESP32_IP}/m"  
-VIBRATE_THRESHOLD = 30.0 
-VIBRATE_COOLDOWN = 2.0  
-last_vibrate_time = 0  
-
-
-load_dotenv() 
-
-
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')  
+# Gemini API Key (use env var for security: os.getenv('GEMINI_API_KEY'))
+GEMINI_API_KEY = "AIzaSyAm9XWsI_kDGmtUehlE5BpcDGWkdfeEVXc"
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
-
+# Device
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
-
+# Text-to-speech engine
 try:
-    engine = pyttsx3.init(driverName='espeak')  
+    engine = pyttsx3.init(driverName='espeak')  # Force espeak on Linux
 except Exception:
     engine = pyttsx3.init()
 
@@ -46,15 +38,16 @@ engine.setProperty('rate', 160)
 # voices = engine.getProperty('voices')
 # engine.setProperty('voice', voices[0].id)
 
-
+# Cooldown for announcements
 last_spoken = {}
-cooldown = 5  
+cooldown = 5  # seconds
 
-
+# Models
+# InsightFace for faces
 face_app = FaceAnalysis(name="buffalo_l")
 face_app.prepare(ctx_id=0 if device == "cuda" else -1, det_size=(640, 640))
 
-
+# YOLO for objects
 yolo_model = YOLO("yolov8n.pt")
 yolo_model.conf = 0.5
 names = yolo_model.names
@@ -114,7 +107,6 @@ def build_face_db(dataset_dir="faces_dataset"):
 
 # Video capture
 cap = cv2.VideoCapture(0)
-# cap = cv2.VideoCapture(VIDEO_ENDPOINT)
 if not cap.isOpened():
     print("Error: Could not open video stream.")
     exit()
@@ -125,46 +117,39 @@ frame_lock = Lock()
 current_frame = None
 pause_detection = False
 
-
+# Distance
 last_distance_update = 0
 current_distance = -1.0
 current_button = "N/A"
 previous_button = "RELEASED"
 
-
+# Button configurations
 BUTTON_HEIGHT = 50
 BUTTON_WIDTH = 640 // 3
 QUIT_RECT = (0, 360 - BUTTON_HEIGHT, BUTTON_WIDTH, 360)
 REGISTER_RECT = (BUTTON_WIDTH, 360 - BUTTON_HEIGHT, 2 * BUTTON_WIDTH, 360)
 DESCRIBE_RECT = (2 * BUTTON_WIDTH, 360 - BUTTON_HEIGHT, 640, 360)
 
-
+# Flags for button actions
 quit_flag = False
 register_flag = False
 describe_flag = False
 
-
+# -------------------------------
+# FUNCTIONS
+# -------------------------------
 def get_distance_from_esp32():
     global current_distance, current_button
     try:
-        response = requests.get(DATA_ENDPOINT, timeout=1.0)
+        response = requests.get(DISTANCE_ENDPOINT, timeout=1.0)
         if response.status_code == 200:
             data = response.json()
-            current_distance = data.get("d", -1.0)
-            current_button = data.get("b", "N/A")
+            current_distance = data.get("distance", -1.0)
+            current_button = data.get("button", "N/A")
     except Exception as e:
-       
+        # print(f"Could not update distance: {e}")  # Commented out to avoid console spam
         current_distance = -1.0
         current_button = "N/A"
-
-# --- NEW: Function to trigger vibration ---
-def trigger_vibration():
-    try:
-        response = requests.get(VIBRATE_ENDPOINT, timeout=1.0)
-        if response.status_code == 200:
-            print("[INFO] Vibration triggered.")
-    except Exception as e:
-        print(f"[WARN] Could not trigger vibration: {e}")
 
 def calculate_quadrant(cx, cy, w, h):
     col = min(2, cx // (w // 3))
@@ -203,7 +188,7 @@ def describe_with_gemini(frame):
     try:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(rgb_frame)
-        response = gemini_model.generate_content(["From a first person perspective describe the scene in this image and include any prominent text.limit the entire response to 25 words and directly start saying do not say I am describing or something like that. ", img])
+        response = gemini_model.generate_content(["From a first person perspective describe the scene in this image and include any prominent text.limi the entire response to 20 words. ", img])
         description = response.text
         print("Gemini Description:", description)
         def speak_description():
@@ -241,6 +226,9 @@ def draw_buttons(frame):
     cv2.rectangle(frame, (DESCRIBE_RECT[0], DESCRIBE_RECT[1]), (DESCRIBE_RECT[2], DESCRIBE_RECT[3]), (200, 200, 200), -1)
     cv2.putText(frame, "Describe", (DESCRIBE_RECT[0] + 40, DESCRIBE_RECT[1] + 35), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
 
+# -------------------------------
+# MAIN LOOP
+# -------------------------------
 load_db()
 build_face_db("faces_dataset")
 save_db()
@@ -253,7 +241,7 @@ distance_time = time.time()
 cv2.namedWindow("Smart Recognition")
 cv2.setMouseCallback("Smart Recognition", on_mouse)
 
-last_faces = []
+last_faces = []  # For registration
 
 while True:
     ret, frame = cap.read()
@@ -267,12 +255,6 @@ while True:
     if now - distance_time >= DISTANCE_UPDATE_INTERVAL:
         Thread(target=get_distance_from_esp32).start()
         distance_time = now
-
-   
-    if current_distance > 0 and current_distance < VIBRATE_THRESHOLD and now - last_vibrate_time >= VIBRATE_COOLDOWN:
-       
-        Thread(target=trigger_vibration).start()
-        last_vibrate_time = now
 
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
@@ -297,24 +279,24 @@ while True:
         else:
             face = max(last_faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
             emb = getattr(face, "normed_embedding", face.embedding / np.linalg.norm(face.embedding))
-      
+            # Enter text input mode
             input_name = ""
             input_active = True
             while input_active:
-              
+                # Clone the current frame to draw on
                 input_frame = current_frame.copy()
-          
+                # Draw text input area
                 cv2.rectangle(input_frame, (100, 150), (540, 210), (255, 255, 255), -1)
                 cv2.putText(input_frame, "Enter name: " + input_name + "_", (110, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
                 cv2.putText(input_frame, "Press Enter to confirm, Esc to cancel", (100, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 cv2.imshow("Smart Recognition", input_frame)
                 
                 input_key = cv2.waitKey(0) & 0xFF
-                if input_key == 27:  
+                if input_key == 27:  # Esc
                     print("[INFO] Registration cancelled.")
                     input_active = False
                     break
-                elif input_key == 13: 
+                elif input_key == 13:  # Enter
                     name = input_name.strip()
                     if not name:
                         print("[WARN] Empty name; skipped.")
@@ -333,9 +315,9 @@ while True:
                         print(f"[INFO] Registered {name} (now {len(face_db[name])} samples).")
                     input_active = False
                     break
-                elif input_key == 8:  
+                elif input_key == 8:  # Backspace
                     input_name = input_name[:-1]
-                elif 32 <= input_key <= 126: 
+                elif 32 <= input_key <= 126:  # Printable characters
                     input_name += chr(input_key)
         register_flag = False
         continue
@@ -354,6 +336,7 @@ while True:
         cv2.imshow("Smart Recognition", current_frame)
         continue
 
+    # Face processing
     faces = face_app.get(current_frame)
     last_faces = faces
     face_detections = []
@@ -367,7 +350,7 @@ while True:
         cv2.rectangle(current_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(current_frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-
+    # Object processing
     yolo_results = yolo_model.predict(source=current_frame, verbose=False)[0]
     boxes = yolo_results.boxes
     object_detections = []
@@ -381,11 +364,11 @@ while True:
             area = (x2 - x1) * (y2 - y1)
             object_detections.append({"name": name, "coords": (x1, y1, x2, y2), "area": area})
 
- 
+    # Combine and sort top detections (faces + objects), but announce separately
     h, w, _ = current_frame.shape
     quadrant_counts = {}
 
-
+    # Process faces (announce top 3 largest, including "Person")
     top_faces = sorted(face_detections, key=lambda x: x["area"], reverse=True)[:3]
     for det in top_faces:
         x1, y1, x2, y2 = det["coords"]
@@ -396,7 +379,7 @@ while True:
         announce_object(name, quadrant, current_distance)
         cv2.circle(current_frame, (cx, cy), 4, (0, 0, 255), -1)
 
-  
+    # Process objects (top 3 largest)
     top_objects = sorted(object_detections, key=lambda x: x["area"], reverse=True)[:3]
     for det in top_objects:
         x1, y1, x2, y2 = det["coords"]
@@ -410,14 +393,9 @@ while True:
         cv2.circle(current_frame, (cx, cy), 4, (0, 0, 255), -1)
         cv2.putText(current_frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-
-    if (len(top_faces) > 0 or len(top_objects) > 0) and current_distance > 0 and current_distance < VIBRATE_THRESHOLD and now - last_vibrate_time >= VIBRATE_COOLDOWN:
-        Thread(target=trigger_vibration).start()
-        last_vibrate_time = now
-
     draw_grid(current_frame, quadrant_counts)
 
-  
+    # FPS and distance display
     now = time.time()
     fps = 1 / (now - fps_time)
     fps_time = now
@@ -427,7 +405,7 @@ while True:
     button_text = f"Button: {current_button}"
     cv2.putText(current_frame, button_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-
+    # Draw buttons
     draw_buttons(current_frame)
 
     cv2.imshow("Smart Recognition", current_frame)
