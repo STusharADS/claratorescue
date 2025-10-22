@@ -20,7 +20,7 @@ DISTANCE_ENDPOINT = "http://192.168.15.254/data"
 DISTANCE_UPDATE_INTERVAL = 1.0  # seconds
 
 # Gemini API Key (use env var for security: os.getenv('GEMINI_API_KEY'))
-GEMINI_API_KEY = "AIzaSyAm9XWsI_kDGmtUehlE5BpcDGWkdfeEVXc"
+GEMINI_API_KEY = ""
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
