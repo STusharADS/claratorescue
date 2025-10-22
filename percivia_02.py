@@ -20,7 +20,7 @@ DISTANCE_UPDATE_INTERVAL = 1.0  # seconds
 # --- SECURITY IMPROVEMENT ---
 # Load API key from environment variable for better security
 # For quick testing, you can hardcode it like this, but be careful.
-GEMINI_API_KEY = "AIzaSyAm9XWsI_kDGmtUehlE5BpcDGWkdfeEVXc" 
+GEMINI_API_KEY = "AIzVXc" 
 
 # Configure Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
